@@ -1,11 +1,15 @@
 use std::{
-    fs::{read_dir, FileType},
+    fs::{read_dir, DirEntry, File, FileType, self},
+    io::Seek,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Error};
+use anyhow::{bail, Context, Error};
 use clap::{Parser, Subcommand};
 use git2::{Repository, RepositoryOpenFlags, StatusOptions};
+use log::info;
+use zip::{result::ZipError, write::FileOptions, ZipWriter};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -35,73 +39,108 @@ fn main() -> Result<(), Error> {
     match &cli.command {
         Commands::Zip { path } => {
             // verify that path exists
-            let path = Path::new(&path);
+            let path = Path::new(path);
 
             if !path.exists() {
                 bail!("path {path:?} does not exist...");
             }
 
-            let git_path = get_ancestor_git(&path)?;
+            // dbg!("f", &path);
 
-            git(git_path, path)?;
+            git(path)?;
         }
     }
 
     Ok(())
 }
 
-// recursively traverse until gitignore file is found
-fn get_ancestor_git(path: &Path) -> Result<PathBuf, Error> {
-    let mut path = PathBuf::from(path);
+fn git(src_dir: &Path) -> Result<(), Error> {
+    // will search up to parent paths for git repo if needed?
+    let repo = Repository::open_ext(src_dir, RepositoryOpenFlags::empty(), Path::new("."))?;
+    let workdir = repo.workdir().unwrap();
 
-    if !path.is_dir() {
-        bail!("path {path:?} is not a directory...");
-    }
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true);
+    opts.recurse_untracked_dirs(true);
+    opts.include_unmodified(true);
 
-    loop {
-        if read_dir(&path)?
-            .flat_map(|p| p.ok())
-            .any(|e| e.file_name().eq_ignore_ascii_case(".git") && e.file_type().unwrap().is_dir())
-        {
-            return Ok(path);
-        }
+    let dir_name = src_dir
+        .file_name()
+        .context("unablet o convert")?
+        .to_str()
+        .context("unable to turn dir name!")?;
 
-        if !path.pop() {
-            bail!("ancestor directories did not contain a git repository lol");
-        }
-    }
+    let glob_path: PathBuf = [src_dir, Path::new("**")].iter().collect();
+    opts.pathspec(glob_path);
+
+    let statuses = repo.statuses(Some(&mut opts))?;
+
+    // create zip file, with the name of the current repo. place in current working directory
+    let dst_path_str = format!("{dir_name}.zip");
+    let dst_path = Path::new(&dst_path_str);
+    let zip_file = File::create(dst_path).unwrap();
+
+    let c: Vec<PathBuf> = statuses
+            .into_iter()
+            .map(|s| s.path().unwrap().to_string())
+            .map(|p| workdir.join(p))
+            .collect();
+
+        // dbg!(&c);
+
+    zip_dir(
+        c,
+        src_dir.canonicalize()?.to_str().context("unable to convert")?,
+        zip_file,
+        zip::CompressionMethod::Bzip2,
+    )?;
+
+    info!("done!!");
+
+    Ok(())
 }
 
-fn git(git_path: PathBuf, relative_path: &Path) -> Result<(), Error> {
-    let repo = Repository::open_ext(".", RepositoryOpenFlags::empty(), Path::new("."))?;
-    let workdir = repo.workdir().unwrap();
+fn zip_dir<T>(
+    it: Vec<PathBuf>,
+    prefix: &str,
+    writer: T,
+    method: zip::CompressionMethod,
+) -> zip::result::ZipResult<()>
+where
+    T: Write + Seek,
+{
+    dbg!(prefix);
 
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true);
-    opts.include_unmodified(true);
-    opts.pathspec(Path::new("*"));
+    let mut zip = ZipWriter::new(writer);
+    let options = FileOptions::default()
+        .compression_method(method)
+        .unix_permissions(0o755);
 
-    let statuses = repo.statuses(Some(&mut opts))?;
+    let mut buffer = Vec::new();
+    for path in it {
+        // for entry in fs::read_dir(path_current)? {
+            let name = path.strip_prefix(Path::new(prefix)).unwrap();
 
-    for status in statuses.iter() {
-        let path = status.path().unwrap();
-        println!("{}", workdir.join(path).display());
+            // Write file or directory explicitly
+            // Some unzip tools unzip files with directory paths correctly, some do not!
+            if path.is_file() {
+                println!("adding file {path:?} as {name:?} ...");
+                #[allow(deprecated)]
+                zip.start_file_from_path(name, options)?;
+                let mut f = File::open(path)?;
+
+                f.read_to_end(&mut buffer)?;
+                zip.write_all(&buffer)?;
+                buffer.clear();
+            } else if !name.as_os_str().is_empty() {
+                // Only if not root! Avoids path spec / warning
+                // and mapname conversion failed error on unzip
+                println!("adding dir {path:?} as {name:?} ...");
+                #[allow(deprecated)]
+                zip.add_directory_from_path(name, options)?;
+            }
+        // }
     }
-
-    let repo = Repository::open_ext(".", RepositoryOpenFlags::empty(), Path::new("."))?;
-    let workdir = repo.workdir().unwrap();
-
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true);
-    opts.include_unmodified(true);
-    opts.pathspec(Path::new("*"));
-
-    let statuses = repo.statuses(Some(&mut opts))?;
-
-    for status in statuses.iter() {
-        let path = status.path().unwrap();
-        println!("{}", workdir.join(path).display());
-    }
-
-    todo!()
+    zip.finish()?;
+    Result::Ok(())
 }
