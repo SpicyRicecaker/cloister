@@ -2,6 +2,11 @@
 name = "cloister"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/SpicyRicecaker/cloister.git"
+description = "Zip non-git ignored files in a directory"
+keywords = ["zip", "ignore", "git"]
+authors = ["Andy Li <awesomenessisgolden@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
