@@ -16,7 +16,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Adds files to myapp
+    /// Recursively adds all files in <directory> to <directory>.zip. Respects .gitignore files. 
     Zip { zip_dir: String },
 }
 
